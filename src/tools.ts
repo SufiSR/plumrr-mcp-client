@@ -4,6 +4,7 @@ import { isAllowedGetPath } from "./allowlist.js";
 import { callUpstreamApi, formatUpstreamError } from "./http.js";
 import { getRequestAuthState } from "./requestContext.js";
 import { resolveCookieHeader } from "./resolveAuth.js";
+import { rankCustomersByQuery, type CustomerRow } from "./customerMatch.js";
 
 type RegisterToolsArgs = {
   server: McpServer;
@@ -71,6 +72,119 @@ async function executeGet(apiBaseUrl: string, path: string, cookieHeader?: strin
 const CookieInput = z.object({
   cookieHeader: z.string().min(1).optional()
 });
+
+const CustomerListInput = z.object({
+  searchTerm: z.string().min(1).optional(),
+  limit: z.number().int().min(1).max(10000).optional(),
+  cookieHeader: z.string().min(1).optional()
+});
+
+function parseCustomerListJson(json: unknown): CustomerRow[] {
+  if (!Array.isArray(json)) {
+    return [];
+  }
+  const out: CustomerRow[] = [];
+  for (const row of json) {
+    if (row && typeof row === "object" && "id" in row && "customer_name" in row) {
+      const r = row as Record<string, unknown>;
+      out.push({
+        id: Number(r.id),
+        customer_name: String(r.customer_name ?? ""),
+        country: r.country as string | null | undefined,
+        segment: r.segment as string | null | undefined,
+        company_code: r.company_code as string | null | undefined,
+        agency_type: r.agency_type as string | null | undefined,
+        number_of_users: r.number_of_users as number | null | undefined,
+        accounts_receivable: r.accounts_receivable as number | null | undefined
+      });
+    }
+  }
+  return out;
+}
+
+async function runCustomersList(
+  apiBaseUrl: string,
+  args: { searchTerm?: string; limit?: number; cookieHeader?: string }
+) {
+  const resolvedCookie = await resolveCookieHeader(apiBaseUrl, args.cookieHeader);
+  const listLimit = args.limit ?? 100;
+
+  if (!args.searchTerm?.trim()) {
+    const path = withQuery("/api/v1/customers", { limit: listLimit });
+    const result = await callUpstreamApi(apiBaseUrl, {
+      method: "GET",
+      path,
+      cookieHeader: resolvedCookie
+    });
+    if (!result.ok) {
+      throw new Error(formatUpstreamError(result));
+    }
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify({ status: result.status, body: result.json }, null, 2) }]
+    };
+  }
+
+  const q = args.searchTerm.trim();
+  const searchPath = withQuery("/api/v1/customers", { search: q, limit: 10000 });
+  const searchResult = await callUpstreamApi(apiBaseUrl, {
+    method: "GET",
+    path: searchPath,
+    cookieHeader: resolvedCookie
+  });
+  if (!searchResult.ok) {
+    throw new Error(formatUpstreamError(searchResult));
+  }
+
+  let rows = parseCustomerListJson(searchResult.json);
+  let ranked = rankCustomersByQuery(q, rows);
+  const MIN_SCORE = 0.35;
+
+  if (ranked.length === 0 || !ranked[0] || ranked[0].matchScore < MIN_SCORE) {
+    const fullPath = withQuery("/api/v1/customers", { limit: 10000 });
+    const fullResult = await callUpstreamApi(apiBaseUrl, {
+      method: "GET",
+      path: fullPath,
+      cookieHeader: resolvedCookie
+    });
+    if (!fullResult.ok) {
+      throw new Error(formatUpstreamError(fullResult));
+    }
+    rows = parseCustomerListJson(fullResult.json);
+    ranked = rankCustomersByQuery(q, rows);
+  }
+
+  const top = ranked.slice(0, 15).map((c) => ({
+    id: c.id,
+    customer_name: c.customer_name,
+    country: c.country,
+    segment: c.segment,
+    company_code: c.company_code,
+    matchScore: Math.round(c.matchScore * 1000) / 1000
+  }));
+
+  const best = ranked[0];
+
+  const payload = {
+    status: 200,
+    searchTerm: q,
+    apiFilter: "Server-side LIKE search plus client-side fuzzy ranking for typos and partial names.",
+    bestMatch: best
+      ? {
+          id: best.id,
+          customer_name: best.customer_name,
+          matchScore: Math.round(best.matchScore * 1000) / 1000
+        }
+      : null,
+    fuzzyMatches: top,
+    note:
+      "Prefer bestMatch.id when matchScore is high (e.g. >= 0.85). If several rows are close, ask the user to confirm. " +
+      "For follow-up tools (MRR, contracts), pass the chosen id as customerId."
+  };
+
+  return {
+    content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }]
+  };
+}
 
 const LoginInput = z.object({
   email: z.string().email().optional(),
@@ -410,13 +524,13 @@ export function registerTools({ server, apiBaseUrl }: RegisterToolsArgs): void {
     {
       title: "Customers: List",
       description:
-        "List all customers with their IDs and names. " +
-        "IMPORTANT: Call this tool FIRST whenever the user mentions a customer by name " +
-        "and you need their numeric ID for other tools (contracts, MRR, losses, etc.). " +
-        "Match the user-provided name against the returned list, then use the matching customer's id.",
-      inputSchema: CookieInput.shape
+        "List or search customers. Uses API query params: search (name filter) and limit (1–10000, default 100 when not searching). " +
+        "When searchTerm is set, calls the API with search=… and limit=10000, then applies fuzzy ranking so imperfect spelling still surfaces the best customer_name match (with matchScore). " +
+        "IMPORTANT: Call with searchTerm when the user gives a company name; use bestMatch.id for MRR/contracts unless scores are ambiguous. " +
+        "Optional limit applies when searchTerm is omitted (plain list).",
+      inputSchema: CustomerListInput.shape
     },
-    async ({ cookieHeader }) => executeGet(apiBaseUrl, "/api/v1/customers", cookieHeader)
+    async (args) => runCustomersList(apiBaseUrl, args)
   );
 
   server.registerTool(

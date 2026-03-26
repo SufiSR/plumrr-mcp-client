@@ -36,7 +36,7 @@ Standalone HTTP/SSE MCP server for LibreChat. Isolated in `mcp-client` with its 
 ### Customers
 | Tool | Description |
 |------|-------------|
-| `customers_list` | List all customers. |
+| `customers_list` | List or search customers (`searchTerm`, `limit`). Fuzzy ranking when searching. |
 | `customers_get_by_id` | Fetch one customer by numeric ID. |
 
 ### MRR
