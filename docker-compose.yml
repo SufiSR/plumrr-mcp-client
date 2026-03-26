@@ -1,0 +1,13 @@
+services:
+  plumrr-mcp-client:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: plumrr-mcp-client
+    environment:
+      MCP_PORT: ${MCP_PORT:-8001}
+      PLUMRR_API_BASE_URL: ${PLUMRR_API_BASE_URL:-http://host.docker.internal:8000}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${MCP_PORT:-8001}:${MCP_PORT:-8001}"
+    restart: unless-stopped
