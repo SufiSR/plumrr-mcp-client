@@ -8,6 +8,8 @@ services:
       MCP_PORT: ${MCP_PORT:-8001}
       PLUMRR_API_BASE_URL: ${PLUMRR_API_BASE_URL:-http://host.docker.internal:8000}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      PLUMRR_CREDENTIAL_HEADER_EMAIL: ${PLUMRR_CREDENTIAL_HEADER_EMAIL:-X-Plumrr-Email}
+      PLUMRR_CREDENTIAL_HEADER_PASSWORD: ${PLUMRR_CREDENTIAL_HEADER_PASSWORD:-X-Plumrr-Password}
     ports:
       - "${MCP_PORT:-8001}:${MCP_PORT:-8001}"
     restart: unless-stopped

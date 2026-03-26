@@ -2,6 +2,8 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { isAllowedGetPath } from "./allowlist.js";
 import { callUpstreamApi, formatUpstreamError } from "./http.js";
+import { getRequestAuthState } from "./requestContext.js";
+import { resolveCookieHeader } from "./resolveAuth.js";
 
 type RegisterToolsArgs = {
   server: McpServer;
@@ -41,10 +43,22 @@ async function executeGet(apiBaseUrl: string, path: string, cookieHeader?: strin
   if (!isAllowedGetPath(cleanPath)) {
     throw new Error(`Path is not allowlisted: ${cleanPath}`);
   }
+  const isEmbedPublic =
+    cleanPath.startsWith("/api/v1/reports/embed/") || cleanPath.startsWith("/api/embed/");
+  let resolvedCookie: string | undefined;
+  try {
+    resolvedCookie = await resolveCookieHeader(apiBaseUrl, cookieHeader);
+  } catch (err) {
+    if (isEmbedPublic && !cookieHeader?.trim()) {
+      resolvedCookie = undefined;
+    } else {
+      throw err;
+    }
+  }
   const result = await callUpstreamApi(apiBaseUrl, {
     method: "GET",
     path,
-    cookieHeader
+    cookieHeader: resolvedCookie
   });
   if (!result.ok) {
     throw new Error(formatUpstreamError(result));
@@ -59,8 +73,8 @@ const CookieInput = z.object({
 });
 
 const LoginInput = z.object({
-  email: z.string().email(),
-  password: z.string().min(1)
+  email: z.string().email().optional(),
+  password: z.string().min(1).optional()
 });
 
 const CustomerIdInput = z.object({
@@ -103,10 +117,19 @@ export function registerTools({ server, apiBaseUrl }: RegisterToolsArgs): void {
       description:
         "Authenticate a user with email and password against PluMRR. " +
         "Returns the user profile and Set-Cookie values. " +
-        "The caller MUST store the returned setCookie values and pass them as cookieHeader in all subsequent tool calls.",
+        "If LibreChat already sends credential headers on MCP requests, you may omit email/password here. " +
+        "Otherwise pass email and password, store the returned setCookie values, and pass them as cookieHeader in subsequent tool calls.",
       inputSchema: LoginInput.shape
     },
-    async ({ email, password }) => {
+    async ({ email: emailArg, password: passwordArg }) => {
+      const store = getRequestAuthState();
+      const email = emailArg ?? store?.email;
+      const password = passwordArg ?? store?.password;
+      if (!email || !password) {
+        throw new Error(
+          "Provide email and password to auth_login, or configure LibreChat MCP headers (X-Plumrr-Email / X-Plumrr-Password)."
+        );
+      }
       const result = await callUpstreamApi(apiBaseUrl, {
         method: "POST",
         path: "/api/v1/auth/login",
@@ -131,15 +154,17 @@ export function registerTools({ server, apiBaseUrl }: RegisterToolsArgs): void {
       description:
         "Refresh the access token cookie. " +
         "Call this when a protected endpoint returns 401. " +
-        "Requires cookieHeader containing the refresh cookie from a previous auth_login call. " +
+        "Requires cookieHeader containing the refresh cookie from a previous auth_login call, " +
+        "or credential headers from LibreChat (same as other tools). " +
         "Returns updated Set-Cookie values that the caller MUST store.",
       inputSchema: CookieInput.shape
     },
     async ({ cookieHeader }) => {
+      const resolved = await resolveCookieHeader(apiBaseUrl, cookieHeader);
       const result = await callUpstreamApi(apiBaseUrl, {
         method: "POST",
         path: "/api/v1/auth/refresh",
-        cookieHeader
+        cookieHeader: resolved
       });
       if (!result.ok) {
         throw new Error(formatUpstreamError(result));
@@ -161,10 +186,11 @@ export function registerTools({ server, apiBaseUrl }: RegisterToolsArgs): void {
       inputSchema: CookieInput.shape
     },
     async ({ cookieHeader }) => {
+      const resolved = await resolveCookieHeader(apiBaseUrl, cookieHeader);
       const result = await callUpstreamApi(apiBaseUrl, {
         method: "POST",
         path: "/api/v1/auth/logout",
-        cookieHeader
+        cookieHeader: resolved
       });
       if (!result.ok) {
         throw new Error(formatUpstreamError(result));
@@ -181,15 +207,16 @@ export function registerTools({ server, apiBaseUrl }: RegisterToolsArgs): void {
       title: "Auth Me",
       description:
         "Get the currently authenticated user profile. " +
-        "Requires cookieHeader from a previous auth_login. " +
+        "Requires cookieHeader from a previous auth_login, or LibreChat credential headers. " +
         "Returns user id, email, name, role, and account status.",
       inputSchema: CookieInput.shape
     },
     async ({ cookieHeader }) => {
+      const resolved = await resolveCookieHeader(apiBaseUrl, cookieHeader);
       const result = await callUpstreamApi(apiBaseUrl, {
         method: "GET",
         path: "/api/v1/auth/me",
-        cookieHeader
+        cookieHeader: resolved
       });
       if (!result.ok) {
         throw new Error(formatUpstreamError(result));

@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { getConfig } from "./config.js";
 import { registerTools } from "./tools.js";
+import { runWithRequestContext } from "./requestContext.js";
 
 const config = getConfig();
 const app = express();
@@ -24,8 +25,9 @@ function createSession(): { server: McpServer; transport: StreamableHTTPServerTr
     {
       instructions:
         "Stateless PluMRR MCP bridge. " +
-        "Use auth_login with email/password to obtain Set-Cookie values. " +
-        "Pass the returned cookieHeader to all subsequent tool calls. " +
+        "If LibreChat sends X-Plumrr-Email and X-Plumrr-Password (or PLUMRR_CREDENTIAL_HEADER_* env) on MCP HTTP requests, " +
+        "the server logs in automatically per request; you do not need to pass credentials or cookieHeader unless you want to override. " +
+        "Otherwise use auth_login with email/password to obtain Set-Cookie values and pass cookieHeader to subsequent tool calls. " +
         "Never inject Authorization: Bearer for user-login endpoints. " +
         "IMPORTANT: Most contract, MRR, and loss tools require a numeric customerId. " +
         "When the user refers to a customer by name, ALWAYS call customers_list first, " +
@@ -57,14 +59,18 @@ app.post("/mcp", async (req, res) => {
       res.status(404).json({ jsonrpc: "2.0", error: { code: -32000, message: "Session not found. Re-initialize." }, id: null });
       return;
     }
-    await session.transport.handleRequest(req, res, req.body);
+    await runWithRequestContext(req, config.PLUMRR_CREDENTIAL_HEADER_EMAIL, config.PLUMRR_CREDENTIAL_HEADER_PASSWORD, () =>
+      session.transport.handleRequest(req, res, req.body)
+    );
     return;
   }
 
   if (isInitializeRequest(req.body)) {
     const { server, transport } = createSession();
     await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+    await runWithRequestContext(req, config.PLUMRR_CREDENTIAL_HEADER_EMAIL, config.PLUMRR_CREDENTIAL_HEADER_PASSWORD, () =>
+      transport.handleRequest(req, res, req.body)
+    );
     return;
   }
 
@@ -82,7 +88,9 @@ app.get("/mcp", async (req, res) => {
     res.status(404).json({ jsonrpc: "2.0", error: { code: -32000, message: "Session not found." }, id: null });
     return;
   }
-  await session.transport.handleRequest(req, res);
+  await runWithRequestContext(req, config.PLUMRR_CREDENTIAL_HEADER_EMAIL, config.PLUMRR_CREDENTIAL_HEADER_PASSWORD, () =>
+    session.transport.handleRequest(req, res)
+  );
 });
 
 app.delete("/mcp", async (req, res) => {

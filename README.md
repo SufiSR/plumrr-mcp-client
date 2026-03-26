@@ -5,9 +5,10 @@ Standalone HTTP/SSE MCP server for LibreChat. Isolated in `mcp-client` with its 
 ## Architecture
 
 - **Stateless**: no server-side session/cookie persistence, no cookie jar, no globals.
-- **Cookie forwarding**: caller provides `cookieHeader` per tool call; MCP forwards it unchanged.
+- **LibreChat credentials (recommended)**: configure MCP `headers` in LibreChat (e.g. `X-Plumrr-Email` / `X-Plumrr-Password`). The server reads these on **each incoming HTTP request** to `/mcp`, performs a single upstream login for that request (cached only in memory for the duration of that request), and uses the resulting cookies for tool calls. The LLM does **not** receive your password and does not need to call `auth_login` first.
+- **Manual cookie mode**: alternatively, call `auth_login` with email/password and pass `cookieHeader` on later tools (or rely on LibreChat headers instead).
 - **Allowlisted**: only approved GET endpoints and auth actions are exposed. Path parameters are sanitized against traversal injection.
-- **Session-aware**: MCP protocol sessions are tracked per `mcp-session-id` header (required by the MCP Streamable HTTP spec), but no user auth state is stored.
+- **Session-aware**: MCP protocol sessions are tracked per `mcp-session-id` header (required by the MCP Streamable HTTP spec), but no PluMRR user auth is stored server-side between HTTP requests.
 
 ## Available Tools
 
@@ -72,6 +73,8 @@ Standalone HTTP/SSE MCP server for LibreChat. Isolated in `mcp-client` with its 
 | `PLUMRR_API_BASE_URL` | `http://host.docker.internal:8000` | Upstream PluMRR API |
 | `MCP_PORT` | `8001` | Port for MCP HTTP server |
 | `LOG_LEVEL` | `info` | Log verbosity |
+| `PLUMRR_CREDENTIAL_HEADER_EMAIL` | `X-Plumrr-Email` | Must match LibreChat MCP header name for email |
+| `PLUMRR_CREDENTIAL_HEADER_PASSWORD` | `X-Plumrr-Password` | Must match LibreChat MCP header name for password |
 | `MCP_BASE_URL` | `http://localhost:${MCP_PORT}` | Test-only override for integration script target |
 
 ## Run locally
