@@ -52,13 +52,14 @@ Standalone HTTP/SSE MCP server for LibreChat. Isolated in `mcp-client` with its 
 | `reports_get_lorenz_curve_filter_options` | Get Lorenz curve report filters. |
 | `reports_get_lost_won_customers` | Get lost/won customer analytics. |
 | `reports_get_lost_won_customers_status` | Get lost/won report generation status. |
-| `reports_get_expansion_waterfall` | Get MRR waterfall data. |
-| `reports_get_ltv` | Get customer lifetime value data. |
+| `reports_get_expansion_waterfall` | Get MRR waterfall data. Requires `month` (YYYY-MM); supports filter arrays. |
+| `reports_get_ltv` | Get customer lifetime value data. Requires `end_month` (YYYY-MM); supports optional cohort and filter params. |
 
 ### Customer Losses
 | Tool | Description |
 |------|-------------|
-| `customer_losses_list` | List all loss entries (admin/editor). |
+| `customer_losses_list` | List loss entries with pagination (`limit`, `offset`) and optional `search` (admin/editor). |
+| `customer_losses_list_all` | Auto-paginate and aggregate all customer-loss pages (admin/editor). |
 | `customer_losses_get_by_id` | Get one loss record by ID (admin/editor). |
 
 ### Embed Reports

@@ -21,7 +21,7 @@ function assertSafeSegment(value: string | number, label: string): string {
   return str;
 }
 
-type QueryValue = string | number | boolean;
+type QueryValue = string | number | boolean | Array<string | number | boolean>;
 
 function withQuery(path: string, query?: Record<string, QueryValue>): string {
   if (!query || Object.keys(query).length === 0) {
@@ -29,9 +29,36 @@ function withQuery(path: string, query?: Record<string, QueryValue>): string {
   }
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(query)) {
-    params.set(key, String(value));
+    if (Array.isArray(value)) {
+      for (const v of value) {
+        params.append(key, String(v));
+      }
+    } else {
+      params.set(key, String(value));
+    }
   }
   return `${path}?${params.toString()}`;
+}
+
+function compactQuery(query: Record<string, QueryValue | undefined | null>): Record<string, QueryValue> {
+  const out: Record<string, QueryValue> = {};
+  for (const [key, value] of Object.entries(query)) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    if (Array.isArray(value)) {
+      if (value.length === 0) {
+        continue;
+      }
+      out[key] = value;
+      continue;
+    }
+    if (typeof value === "string" && value.trim() === "") {
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
 }
 
 function stripQueryString(path: string): string {
@@ -186,6 +213,82 @@ async function runCustomersList(
   };
 }
 
+async function runCustomerLossesListAll(
+  apiBaseUrl: string,
+  args: { search?: string; page_size?: number; max_pages?: number; cookieHeader?: string }
+) {
+  const resolvedCookie = await resolveCookieHeader(apiBaseUrl, args.cookieHeader);
+  const pageSize = args.page_size ?? 200;
+  const maxPages = args.max_pages ?? 25;
+
+  let offset = 0;
+  let total: number | undefined;
+  const items: unknown[] = [];
+  let pagesFetched = 0;
+
+  while (pagesFetched < maxPages) {
+    const query: Record<string, QueryValue> = { limit: pageSize, offset };
+    if (args.search?.trim()) {
+      query.search = args.search.trim();
+    }
+
+    const path = withQuery("/api/v1/customer-losses", query);
+    const result = await callUpstreamApi(apiBaseUrl, {
+      method: "GET",
+      path,
+      cookieHeader: resolvedCookie
+    });
+    if (!result.ok) {
+      throw new Error(formatUpstreamError(result));
+    }
+
+    const body = (result.json ?? {}) as Record<string, unknown>;
+    const pageItems = Array.isArray(body.items) ? body.items : [];
+    const pageTotal = typeof body.total === "number" ? body.total : undefined;
+    const pageLimit = typeof body.limit === "number" ? body.limit : pageSize;
+
+    if (typeof pageTotal === "number") {
+      total = pageTotal;
+    }
+
+    items.push(...pageItems);
+    pagesFetched += 1;
+
+    if (pageItems.length < pageLimit) {
+      break;
+    }
+    if (typeof total === "number" && items.length >= total) {
+      break;
+    }
+
+    offset += pageLimit;
+  }
+
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(
+          {
+            status: 200,
+            total: total ?? items.length,
+            fetched: items.length,
+            pagesFetched,
+            pageSize,
+            maxPages,
+            search: args.search ?? null,
+            items,
+            truncated:
+              typeof total === "number" ? items.length < total : pagesFetched >= maxPages
+          },
+          null,
+          2
+        )
+      }
+    ]
+  };
+}
+
 const LoginInput = z.object({
   email: z.string().email().optional(),
   password: z.string().min(1).optional()
@@ -218,6 +321,41 @@ const ReportsEmbedInput = z.object({
   query: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
   cookieHeader: z.string().min(1).optional(),
   useLegacyApiEmbedPath: z.boolean().optional()
+});
+
+const ReportFiltersInput = z.object({
+  company_codes: z.array(z.string().min(1)).optional(),
+  segments: z.array(z.string().min(1)).optional(),
+  countries: z.array(z.string().min(1)).optional(),
+  agency_types: z.array(z.string().min(1)).optional(),
+  regions: z.array(z.string().min(1)).optional(),
+  cookieHeader: z.string().min(1).optional()
+});
+
+const ExpansionWaterfallInput = ReportFiltersInput.extend({
+  month: z.string().regex(/^\d{4}-\d{2}$/, "month must be YYYY-MM")
+});
+
+const LtvInput = ReportFiltersInput.extend({
+  end_month: z.string().regex(/^\d{4}-\d{2}$/, "end_month must be YYYY-MM"),
+  cohort_from: z.string().regex(/^\d{4}-\d{2}$/, "cohort_from must be YYYY-MM").optional(),
+  cohort_to: z.string().regex(/^\d{4}-\d{2}$/, "cohort_to must be YYYY-MM").optional(),
+  min_history_months: z.number().int().min(1).max(60).optional(),
+  churn_confirmation_months: z.number().int().min(1).max(12).optional()
+});
+
+const CustomerLossesListInput = z.object({
+  limit: z.number().int().min(1).max(500).optional(),
+  offset: z.number().int().min(0).optional(),
+  search: z.string().min(1).max(100).optional(),
+  cookieHeader: z.string().min(1).optional()
+});
+
+const CustomerLossesListAllInput = z.object({
+  search: z.string().min(1).max(100).optional(),
+  page_size: z.number().int().min(1).max(500).optional(),
+  max_pages: z.number().int().min(1).max(200).optional(),
+  cookieHeader: z.string().min(1).optional()
 });
 
 export function registerTools({ server, apiBaseUrl }: RegisterToolsArgs): void {
@@ -618,10 +756,24 @@ export function registerTools({ server, apiBaseUrl }: RegisterToolsArgs): void {
       title: "Reports: Expansion Waterfall",
       description:
         "Fetch expansion waterfall insight data showing MRR movements (new, expansion, contraction, churn). " +
-        "Use when the user asks about revenue growth composition or MRR waterfall analysis.",
-      inputSchema: CookieInput.shape
+        "REQUIRED: month in YYYY-MM format (e.g. 2026-02). " +
+        "Optional filters: company_codes, segments, countries, agency_types, regions (all string arrays). " +
+        "Use reports_get_filter_options first when the user asks for filtered analysis.",
+      inputSchema: ExpansionWaterfallInput.shape
     },
-    async ({ cookieHeader }) => executeGet(apiBaseUrl, "/api/v1/reports/insights/expansion-waterfall", cookieHeader)
+    async ({ month, company_codes, segments, countries, agency_types, regions, cookieHeader }) =>
+      executeGet(
+        apiBaseUrl,
+        withQuery("/api/v1/reports/insights/expansion-waterfall", compactQuery({
+          month,
+          company_codes,
+          segments,
+          countries,
+          agency_types,
+          regions
+        })),
+        cookieHeader
+      )
   );
 
   server.registerTool(
@@ -630,10 +782,41 @@ export function registerTools({ server, apiBaseUrl }: RegisterToolsArgs): void {
       title: "Reports: LTV",
       description:
         "Fetch customer lifetime value (LTV) insight data. " +
-        "Use when the user asks about customer LTV, average revenue per customer, or long-term value analysis.",
-      inputSchema: CookieInput.shape
+        "REQUIRED: end_month in YYYY-MM format (e.g. 2026-02). " +
+        "Optional: cohort_from, cohort_to (YYYY-MM), min_history_months (1-60), churn_confirmation_months (1-12), " +
+        "and filter arrays company_codes, segments, countries, agency_types, regions. " +
+        "Use reports_get_filter_options first to discover valid filter values.",
+      inputSchema: LtvInput.shape
     },
-    async ({ cookieHeader }) => executeGet(apiBaseUrl, "/api/v1/reports/insights/ltv", cookieHeader)
+    async ({
+      end_month,
+      cohort_from,
+      cohort_to,
+      min_history_months,
+      churn_confirmation_months,
+      company_codes,
+      segments,
+      countries,
+      agency_types,
+      regions,
+      cookieHeader
+    }) =>
+      executeGet(
+        apiBaseUrl,
+        withQuery("/api/v1/reports/insights/ltv", compactQuery({
+          end_month,
+          cohort_from,
+          cohort_to,
+          min_history_months,
+          churn_confirmation_months,
+          company_codes,
+          segments,
+          countries,
+          agency_types,
+          regions
+        })),
+        cookieHeader
+      )
   );
 
   // ── Customer Losses ─────────────────────────────────────────────────
@@ -643,12 +826,35 @@ export function registerTools({ server, apiBaseUrl }: RegisterToolsArgs): void {
     {
       title: "Customer Losses: List",
       description:
-        "List all customer loss entries. " +
-        "Requires admin or editor role. " +
-        "Use when analyzing overall customer churn or loss trends across the business.",
-      inputSchema: CookieInput.shape
+        "List customer loss entries with pagination and optional search. " +
+        "Supports limit (1-500, default 50), offset (>=0, default 0), and search by customer name. " +
+        "Use for page-by-page retrieval or targeted lookup when you do not need all rows at once.",
+      inputSchema: CustomerLossesListInput.shape
     },
-    async ({ cookieHeader }) => executeGet(apiBaseUrl, "/api/v1/customer-losses", cookieHeader)
+    async ({ limit, offset, search, cookieHeader }) =>
+      executeGet(
+        apiBaseUrl,
+        withQuery("/api/v1/customer-losses", compactQuery({
+          limit: limit ?? 50,
+          offset: offset ?? 0,
+          search
+        })),
+        cookieHeader
+      )
+  );
+
+  server.registerTool(
+    "customer_losses_list_all",
+    {
+      title: "Customer Losses: List All (Auto-Paginate)",
+      description:
+        "Fetches all customer-loss pages automatically using limit/offset until total is reached or max_pages is hit. " +
+        "Use this when the user asks for complete customer-loss data. " +
+        "Inputs: search (optional), page_size (1-500, default 200), max_pages (default 25). " +
+        "Response includes items plus pagination metadata and truncated flag.",
+      inputSchema: CustomerLossesListAllInput.shape
+    },
+    async (args) => runCustomerLossesListAll(apiBaseUrl, args)
   );
 
   server.registerTool(
